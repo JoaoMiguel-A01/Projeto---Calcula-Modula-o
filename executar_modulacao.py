@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 
 # ==========================================
-# UTILITÁRIOS E VALIDAÇÕES
+# UTILITÁRIOS E VALIDAÇÕES ultima attualização: 2026-03-03
 # ==========================================
 def imprimir_cabecalho(mensagem):
     print("\n" + "=" * 60)
