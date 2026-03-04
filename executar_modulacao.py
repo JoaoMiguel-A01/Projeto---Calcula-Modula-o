@@ -252,7 +252,7 @@ def main():
         segundos_espera = calcular_segundos_ate_horario(horario)
         horas_espera = segundos_espera / 3600
         
-        print(f"\n[zZz] Aguardando execução. Hora Definida: {horas_espera:.2f} horas, exatamente às {horario}.")
+        print(f"\nAguardando horário de execução. Hora Definida: {horas_espera:.2f} horas, exatamente às {horario}.")
         
         # O programa pausa aqui até chegar no horário definido, economizando recursos do sistema
         time.sleep(segundos_espera)
