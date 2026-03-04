@@ -3,64 +3,18 @@ import sys
 import subprocess
 import configparser
 import time
-import importlib
 from datetime import datetime, timedelta
 
-import openpyxl
-
-
 # ==========================================
-# UTILITÁRIOS
+# UTILITÁRIOS E VALIDAÇÕES
 # ==========================================
 def imprimir_cabecalho(mensagem):
     print("\n" + "=" * 60)
     print(mensagem)
     print("=" * 60)
 
-
-def verificar_e_instalar_dependencias(config, caminho_config):
-    instaladas = config.getboolean("ORQUESTRADOR", "DEPENDENCIAS_INSTALADAS", fallback=False)
-    if instaladas:
-        print("\nBibliotecas já instaladas. Avançando...")
-        return
-
-    print("\nVerificando bibliotecas necessárias no computador pela primeira vez...")
-    dependencias = {
-        "pandas": "pandas",
-        "requests": "requests",
-        "matplotlib": "matplotlib",
-        "openpyxl": "openpyxl",
-    }
-
-    precisa_reiniciar = False
-    for modulo, pacote in dependencias.items():
-        try:
-            importlib.import_module(modulo)
-            print(f" [v] {pacote} já está instalado.")
-        except ImportError:
-            print(f" [!] Biblioteca '{pacote}' não encontrada. Tentando instalar automaticamente...")
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", pacote], stdout=subprocess.DEVNULL)
-                print(f" [+] '{pacote}' instalado com sucesso!")
-                precisa_reiniciar = True
-            except subprocess.CalledProcessError:
-                print(f"\n [ERRO CRÍTICO] Falha ao tentar instalar '{pacote}'.")
-                print(" [BLOQUEIO] Sem permissão ou sem Internet para instalar automaticamente.")
-                print(f" Instale manualmente:  pip install {pacote}")
-                sys.exit(1)
-
-    if "ORQUESTRADOR" not in config:
-        config.add_section("ORQUESTRADOR")
-
-    config.set("ORQUESTRADOR", "DEPENDENCIAS_INSTALADAS", "True")
-    with open(caminho_config, "w", encoding="utf-8") as configfile:
-        config.write(configfile)
-
-    if precisa_reiniciar:
-        print(" [!] Novas bibliotecas instaladas. Configuração gravada no config.ini!")
-
-
 def arquivo_foi_modificado_hoje(pasta, extensao=".xlsx"):
+    """Verifica se existe algum arquivo na pasta que foi criado/modificado hoje."""
     if not os.path.exists(pasta):
         return False
 
@@ -68,272 +22,121 @@ def arquivo_foi_modificado_hoje(pasta, extensao=".xlsx"):
     for arquivo in os.listdir(pasta):
         if arquivo.lower().endswith(extensao):
             caminho = os.path.join(pasta, arquivo)
-            if datetime.fromtimestamp(os.path.getmtime(caminho)).date() == hoje:
+            data_modificacao = datetime.fromtimestamp(os.path.getmtime(caminho)).date()
+            if data_modificacao == hoje:
                 return True
     return False
 
-
-def obter_arquivo_mais_recente(pasta, extensao=".xlsx"):
-    if not os.path.exists(pasta):
-        return None
-
-    candidatos = [
-        os.path.join(pasta, f)
-        for f in os.listdir(pasta)
-        if f.lower().endswith(extensao)
-    ]
-    if not candidatos:
-        return None
-
-    candidatos.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return candidatos[0]
-
-
-# ==========================================
-# REGRA DE DATA-ALVO (janela do PLD)
-# ==========================================
-def calcular_data_alvo_pld():
+def validar_pld_baixado(pasta_pld, target_date):
     """
-    - Se horário local >= 17:00 -> data-alvo = amanhã
-    - Se horário local <  17:00 -> data-alvo = hoje
+    Abre os XLSX recém-baixados na pasta e procura ativamente a data alvo na coluna 'DIA'.
+    Retorna True se achar.
     """
-    agora = datetime.now()
-    if agora.hour >= 17:
-        return (agora.date() + timedelta(days=1))
-    return agora.date()
-
-
-# ==========================================
-# VALIDAÇÃO DO CONTEÚDO DO PLD (formato real)
-# Aba: PLD_SUDESTE
-# Colunas esperadas: MES_REFERENCIA, SUBMERCADO, PERIODO_COMERCIALIZACAO, DIA, HORA, PLD_HORA
-# ==========================================
-def _ler_linha_cabecalho(ws):
-    """
-    Assume cabeçalho na primeira linha.
-    Retorna lista de strings (valores das colunas) normalizados.
-    """
-    headers = []
-    for col in range(1, ws.max_column + 1):
-        v = ws.cell(row=1, column=col).value
-        headers.append(str(v).strip() if v is not None else "")
-    return headers
-
-
-def validar_pld_para_data_alvo(caminho_xlsx, data_alvo, aba="PLD_SUDESTE", exigir_dia_completo=True):
-    """
-    Valida se o arquivo possui PLD do dia-alvo, conforme o layout observado.
-
-    Checagens:
-    1) Aba existe
-    2) Cabeçalhos esperados
-    3) Existe linhas com MES_REFERENCIA==YYYYMM e DIA==DD e SUBMERCADO==SUDESTE
-    4) (opcional) Dia completo: 24 horas (0..23) com PLD_HORA válido
-    """
-    if not caminho_xlsx or not os.path.exists(caminho_xlsx):
-        return False, "Arquivo inexistente."
-
     try:
-        wb = openpyxl.load_workbook(caminho_xlsx, read_only=True, data_only=True)
+        import openpyxl
+    except ImportError:
+        print(" [ERRO] A biblioteca 'openpyxl' não está instalada no servidor.")
+        return False
 
-        if aba not in wb.sheetnames:
-            wb.close()
-            return False, f"Aba '{aba}' não encontrada no arquivo."
-
-        ws = wb[aba]
-
-        # 1) Cabeçalho
-        headers = _ler_linha_cabecalho(ws)
-        esperados = ["MES_REFERENCIA", "SUBMERCADO", "PERIODO_COMERCIALIZACAO", "DIA", "HORA", "PLD_HORA"]
-
-        # Verifica se os esperados aparecem na ordem exata (mais rígido e seguro)
-        if headers[:6] != esperados:
-            wb.close()
-            return False, f"Cabeçalho inesperado. Esperado {esperados} e veio {headers[:6]}"
-
-        # 2) Define alvo (YYYYMM e DD)
-        mes_ref_alvo = data_alvo.year * 100 + data_alvo.month
-        dia_alvo = data_alvo.day
-
-        horas_encontradas = set()
-        linhas_dia = 0
-
-        # 3) varre dados a partir da linha 2
-        for r in range(2, ws.max_row + 1):
-            mes_ref = ws.cell(r, 1).value
-            submercado = ws.cell(r, 2).value
-            dia = ws.cell(r, 4).value
-            hora = ws.cell(r, 5).value
-            pld = ws.cell(r, 6).value
-
-            # filtros principais
-            if mes_ref is None or dia is None or hora is None:
-                continue
-
-            # normalizações simples
+    for arquivo in os.listdir(pasta_pld):
+        if arquivo.lower().endswith(".xlsx") and not arquivo.startswith("~$"):
+            caminho = os.path.join(pasta_pld, arquivo)
             try:
-                mes_ref = int(mes_ref)
-                dia = int(dia)
-                hora = int(hora)
-            except Exception:
-                continue
+                wb = openpyxl.load_workbook(caminho, data_only=True, read_only=True)
+                ws = wb.worksheets[0]
 
-            if str(submercado).strip().upper() != "SUDESTE":
-                continue
+                header = [str(cell.value).strip().upper() for cell in ws[1] if cell.value]
+                if "DIA" not in header:
+                    continue
 
-            if mes_ref != mes_ref_alvo or dia != dia_alvo:
-                continue
+                idx_dia = header.index("DIA")
+                encontrou = False
 
-            # achou linha do dia-alvo
-            linhas_dia += 1
+                for row in ws.iter_rows(min_row=2, max_row=500, values_only=True):
+                    if row[idx_dia] is not None:
+                        try:
+                            if int(row[idx_dia]) == target_date.day:
+                                encontrou = True
+                                break
+                        except:
+                            pass
 
-            # PLD precisa existir e ser numérico
-            if pld is None:
-                continue
-            try:
-                float(pld)
-            except Exception:
-                continue
+                wb.close()
+                if encontrou:
+                    return True
 
-            horas_encontradas.add(hora)
-
-        wb.close()
-
-        # 4) validações finais
-        if linhas_dia == 0:
-            return False, f"Não há registros para MES_REFERENCIA={mes_ref_alvo} e DIA={dia_alvo} (SUDESTE)."
-
-        if exigir_dia_completo:
-            esperado = set(range(24))
-            faltando = sorted(list(esperado - horas_encontradas))
-            if faltando:
-                return False, f"Dia-alvo encontrado, mas faltam horas: {faltando}"
-            return True, "Dia-alvo encontrado com 24 horas válidas."
-
-        return True, "Dia-alvo encontrado (validação simples)."
-
-    except Exception as e:
-        return False, f"Erro ao validar planilha: {e}"
-
+            except Exception as e:
+                print(f" [AVISO] Não foi possível validar {arquivo}: {e}")
+                
+    return False
 
 def executar_download_pld_com_validacao(script_path, max_tentativas, espera_segundos, pasta_pld):
-    """
-    Executa o download e valida conteúdo conforme regra da janela do PLD.
-    Se não validar, aplica a mesma lógica de quando 'não baixou': espera e tenta novamente.
-    """
-    data_alvo = calcular_data_alvo_pld()
-    print(f"[INFO] Data-alvo do PLD (regra 17h): {data_alvo.strftime('%d/%m/%Y')}")
+    """Executa o script de PLD e em seguida valida o conteúdo."""
+    agora = datetime.now()
+    if agora.hour >= 17:
+        target_date = (agora + timedelta(days=1)).date()
+    else:
+        target_date = agora.date()
 
     for tentativa in range(1, max_tentativas + 1):
-        print(f" [Tentativa {tentativa}/{max_tentativas}] Rodando {os.path.basename(script_path)}...")
-
+        print(f" [Tentativa {tentativa}/{max_tentativas}] Baixando PLD...")
         try:
             subprocess.run([sys.executable, script_path], check=True)
-        except subprocess.CalledProcessError as erro:
-            print(f" [AVISO] Script falhou (código {erro.returncode}).")
-            if tentativa < max_tentativas:
-                print(f" [!] Aguardando {espera_segundos/60:.1f} minutos para tentar novamente...")
-                time.sleep(espera_segundos)
-                continue
-            print(" [ERRO FATAL] Todas as tentativas esgotadas.")
-            return False
+            print(" [v] Script concluiu com sucesso. Validando dados baixados...")
 
-        # validação 0: arquivo atualizado hoje (mantém sua lógica antiga como pré-filtro)
-        if not arquivo_foi_modificado_hoje(pasta_pld):
-            print(" [AVISO] Nenhum arquivo .xlsx foi modificado hoje na pasta do PLD.")
-        else:
-            # validação 1: conteúdo do arquivo mais recente
-            arquivo_recente = obter_arquivo_mais_recente(pasta_pld, ".xlsx")
-            ok, motivo = validar_pld_para_data_alvo(
-                arquivo_recente,
-                data_alvo,
-                aba="PLD_SUDESTE",
-                exigir_dia_completo=True,  # << reforço contra brecha
-            )
-
-            if ok:
-                print(f" [+] PLD válido confirmado em: {os.path.basename(arquivo_recente)}")
-                print(f"     Motivo: {motivo}")
+            if validar_pld_baixado(pasta_pld, target_date):
+                print(f" [+] SUCESSO! Dados do dia {target_date.strftime('%d/%m/%Y')} confirmados no XLSX.")
                 return True
+            else:
+                print(f" [!] XLSX baixado, porém os dados do dia {target_date.strftime('%d/%m/%Y')} NÃO ESTÃO LÁ AINDA.")
+                
+        except subprocess.CalledProcessError as e:
+            print(f" [AVISO] Falha ao tentar rodar o script de PLD (Erro {e.returncode}).")
 
-            print(f" [AVISO] PLD ainda NÃO está válido: {motivo}")
-
-        # mesma lógica de "não baixou"
         if tentativa < max_tentativas:
-            print(f" [!] Aguardando {espera_segundos/60:.1f} minutos para tentar novamente...")
+            print(f" [!] A CCEE ainda não disponibilizou os dados finais ou o site caiu.")
+            print(f" [!] Aguardando {espera_segundos / 60:.1f} minutos para nova tentativa...")
             time.sleep(espera_segundos)
         else:
-            print(" [ERRO FATAL] Todas as tentativas esgotadas (PLD não validou a data-alvo).")
+            print(" [ERRO FATAL] Todas as tentativas esgotadas. PLD indisponível hoje.")
             return False
 
+def calcular_segundos_ate_horario(horario_str):
+    """Calcula quantos segundos faltam de 'agora' até o 'horário' especificado."""
+    agora = datetime.now()
+    try:
+        hora, minuto = map(int, horario_str.split(':'))
+    except ValueError:
+        print(f" [ERRO] Formato de horário inválido: {horario_str}. Usando 17:15 como padrão.")
+        hora, minuto = 17, 15
+        
+    alvo = agora.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+    
+    # Se o horário de hoje já passou, o alvo será amanhã neste mesmo horário
+    if agora >= alvo:
+        alvo += timedelta(days=1)
+        
+    return (alvo - agora).total_seconds()
 
 # ==========================================
-# MAIN
+# ROTINA DIÁRIA (O TRABALHO DO DAEMON)
 # ==========================================
-def main():
-    imprimir_cabecalho("INICIANDO MAIN MODULAÇÃO")
-
+def rotina_diaria_de_modulacao():
+    """Esta é a função que será chamada todos os dias no horário agendado."""
+    imprimir_cabecalho("INICIANDO A ROTINA DIÁRIA DE MODULAÇÃO")
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    print(f"Diretório base: {base_dir}")
 
+    # Lê o config a cada execução, para caso a TI altere valores sem reiniciar o serviço
     config_path = os.path.join(base_dir, "Configuracoes", "config.ini")
-    template_path = os.path.join(base_dir, "Templates", "AAAA.MM.DD_Modulacao_Consumo e Cessao.xlsx")
-    vbs_path = os.path.join(base_dir, "Src", "recalcular_salvar_fechar.vbs")
-
-    if not os.path.exists(config_path):
-        print(f"\n[BLOQUEIO] Arquivo 'config.ini' não encontrado em: {config_path}")
-        sys.exit(1)
-
     config = configparser.ConfigParser()
     config.optionxform = str
-    config.read(config_path, encoding="utf-8")
+    config.read(config_path, encoding='utf-8')
 
-    if "ORQUESTRADOR" not in config:
-        config.add_section("ORQUESTRADOR")
+    max_tentativas_ccee = config.getint("ORQUESTRADOR", "MAX_TENTATIVAS_CCEE", fallback=20)
+    tempo_espera_minutos = config.getint("ORQUESTRADOR", "TEMPO_ESPERA_MINUTOS", fallback=20)
 
-    if not config.has_option("ORQUESTRADOR", "MAX_TENTATIVAS_CCEE"):
-        config.set("ORQUESTRADOR", "MAX_TENTATIVAS_CCEE", "20")
-
-    if not config.has_option("ORQUESTRADOR", "TEMPO_ESPERA_MINUTOS"):
-        config.set("ORQUESTRADOR", "TEMPO_ESPERA_MINUTOS", "20")
-
-    max_tentativas_ccee = config.getint("ORQUESTRADOR", "MAX_TENTATIVAS_CCEE")
-    tempo_espera_minutos = config.getint("ORQUESTRADOR", "TEMPO_ESPERA_MINUTOS")
-
-    verificar_e_instalar_dependencias(config, config_path)
-
-    # Pastas de saída
-    pastas_necessarias = ["PLD_Horario_Sudeste", "Planilha_Modulacao", "Logs", "GraficosPLD"]
-    print("\nVerificando pastas de saída...")
-    for pasta in pastas_necessarias:
-        caminho = os.path.join(base_dir, pasta)
-        if not os.path.exists(caminho):
-            os.makedirs(caminho)
-            print(f" [+] Criado: {pasta}")
-
-    # Template
-    if not os.path.exists(template_path):
-        print("\n[BLOQUEIO] Planilha Template não encontrada na pasta 'Templates'!")
-        sys.exit(1)
-
-    # Atualiza INI com rotas dinâmicas
-    print("\nAtualizando caminhos internos...")
-    if "DIRETORIOS" not in config:
-        config.add_section("DIRETORIOS")
-
-    config.set("DIRETORIOS", "PLD_HORARIO", os.path.join(base_dir, "PLD_Horario_Sudeste"))
-    config.set("DIRETORIOS", "TEMPLATE_PLANILHA", template_path)
-    config.set("DIRETORIOS", "SAIDA_PLANILHAS", os.path.join(base_dir, "Planilha_Modulacao"))
-    config.set("DIRETORIOS", "DIRETORIO_LOGS", os.path.join(base_dir, "Logs"))
-    config.set("DIRETORIOS", "DIRETORIO_NOTIFICACAO", base_dir)
-    config.set("DIRETORIOS", "VBS_SCRIPT", vbs_path)
-    config.set("DIRETORIOS", "TEMP_IMG", os.path.join(base_dir, "GraficosPLD", "grafico_pld.png"))
-
-    with open(config_path, "w", encoding="utf-8") as configfile:
-        config.write(configfile)
-
-    # Variáveis de negócio obrigatórias
-    print("\nVerificando variáveis de negócio...")
+    # Verifica Regras de Negócio antes de iniciar
+    print("🔐 Verificando variáveis de negócio...")
     chaves = [
         ("TELEGRAM", "BOT_TOKEN"),
         ("TELEGRAM", "CHAT_ID"),
@@ -350,38 +153,111 @@ def main():
 
     if vazios:
         print(" [ERRO CRÍTICO] Preencha no 'config.ini':", ", ".join(vazios))
-        sys.exit(1)
+        print(" [BLOQUEIO] A rotina de hoje foi cancelada por falta de variáveis. Tentarei amanhã.")
+        return # O "return" cancela a rotina de hoje, mas mantém o serviço vivo
 
     print("\n" + "=" * 60 + "\nINICIANDO CASCATA\n" + "=" * 60)
 
-    # PASSO 1: Baixar PLD com validação robusta
+    # PASSO 1: Baixar PLD
     print(f"\n⏳ PASSO 1: Baixar PLD (Até {max_tentativas_ccee} tentativas)")
     script_pld = os.path.join(base_dir, "Src", "baixar_pld_ccee_sudeste_xlsx.py")
     pasta_pld = os.path.join(base_dir, "PLD_Horario_Sudeste")
 
-    if not executar_download_pld_com_validacao(
-        script_pld,
-        max_tentativas_ccee,
-        tempo_espera_minutos * 60,
-        pasta_pld,
-    ):
-        sys.exit(1)
+    if not executar_download_pld_com_validacao(script_pld, max_tentativas_ccee, tempo_espera_minutos * 60, pasta_pld):
+        print("\n[BLOQUEIO] Falha crítica ao obter o PLD do dia. A rotina de hoje foi abortada.")
+        return
 
-    # PASSO 2
+    # PASSO 2: Preencher Template
     print("\n⏳ PASSO 2: Preencher Template")
     script_gerar = os.path.join(base_dir, "Src", "gerar_modulacao_parada_diaria_v3.py")
-    subprocess.run([sys.executable, script_gerar], check=True)
+    try:
+        subprocess.run([sys.executable, script_gerar], check=True)
+    except subprocess.CalledProcessError:
+        print("\n[BLOQUEIO] Falha ao gerar a planilha. A rotina de hoje foi abortada.")
+        return
 
     if not arquivo_foi_modificado_hoje(os.path.join(base_dir, "Planilha_Modulacao")):
-        sys.exit(1)
+        print("\n[BLOQUEIO] Planilha não encontrada na pasta de saída. Abortando hoje.")
+        return
 
-    # PASSO 3
+    # PASSO 3: Analisar Cenários e Enviar
     print("\n⏳ PASSO 3: Analisar Cenários e Enviar Telegram")
     script_notifica = os.path.join(base_dir, "Src", "NotificaCustoModulacao.py")
-    subprocess.run([sys.executable, script_notifica], check=True)
+    try:
+        subprocess.run([sys.executable, script_notifica], check=True)
+    except subprocess.CalledProcessError:
+        print("\n[ERRO] O relatório financeiro falhou ao ser enviado. Abortando hoje.")
+        return
 
-    imprimir_cabecalho("PROCESSO CONCLUIDO COM SUCESSO!")
+    imprimir_cabecalho("ESTEIRA DE PRODUÇÃO CONCLUÍDA COM SUCESSO! ✅")
 
+
+# ==========================================
+# INICIALIZAÇÃO E LOOP DO SERVIÇO NATIVO
+# ==========================================
+def main():
+    imprimir_cabecalho("SERVIÇO DE MODULAÇÃO INICIADO (Modo Daemon Nativo)")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    config_path = os.path.join(base_dir, "Configuracoes", "config.ini")
+    if not os.path.exists(config_path):
+        print(f"[FATAL] Arquivo 'config.ini' não encontrado em: {config_path}")
+        sys.exit(1)
+
+    config = configparser.ConfigParser()
+    config.optionxform = str
+    config.read(config_path, encoding='utf-8')
+
+    # Configuração inicial obrigatória
+    if "ORQUESTRADOR" not in config: config.add_section("ORQUESTRADOR")
+    if not config.has_option("ORQUESTRADOR", "MAX_TENTATIVAS_CCEE"): config.set("ORQUESTRADOR", "MAX_TENTATIVAS_CCEE", "20")
+    if not config.has_option("ORQUESTRADOR", "TEMPO_ESPERA_MINUTOS"): config.set("ORQUESTRADOR", "TEMPO_ESPERA_MINUTOS", "20")
+    if not config.has_option("ORQUESTRADOR", "HORARIO_EXECUCAO"): config.set("ORQUESTRADOR", "HORARIO_EXECUCAO", "17:15")
+
+    # Criação de Pastas
+    pastas_necessarias = ["PLD_Horario_Sudeste", "Planilha_Modulacao", "Logs", "GraficosPLD"]
+    for pasta in pastas_necessarias:
+        os.makedirs(os.path.join(base_dir, pasta), exist_ok=True)
+
+    template_path = os.path.join(base_dir, 'Templates', 'AAAA.MM.DD_Modulacao_Consumo e Cessao.xlsx')
+    if not os.path.exists(template_path):
+        print("\n[FATAL] Planilha Template não encontrada na pasta 'Templates'!")
+        sys.exit(1)
+
+    # Reescreve rotas
+    if "DIRETORIOS" not in config: config.add_section("DIRETORIOS")
+    config.set("DIRETORIOS", "PLD_HORARIO", os.path.join(base_dir, "PLD_Horario_Sudeste"))
+    config.set("DIRETORIOS", "TEMPLATE_PLANILHA", template_path)
+    config.set("DIRETORIOS", "SAIDA_PLANILHAS", os.path.join(base_dir, "Planilha_Modulacao"))
+    config.set("DIRETORIOS", "DIRETORIO_LOGS", os.path.join(base_dir, "Logs"))
+    config.set("DIRETORIOS", "DIRETORIO_NOTIFICACAO", base_dir)
+    config.set("DIRETORIOS", "VBS_SCRIPT", os.path.join(base_dir, "Src", "recalcular_salvar_fechar.vbs"))
+    config.set("DIRETORIOS", "TEMP_IMG", os.path.join(base_dir, "GraficosPLD", "grafico_pld.png"))
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        config.write(f)
+
+    print(f"\n[v] Ambiente validado e configurado.")
+
+    # ===============================================
+    # O CORAÇÃO DO DAEMON - LOOP INFINITO NATIVO
+    # ===============================================
+    while True:
+        # Lê o horário do config.ini a cada volta (permite que a TI altere sem reiniciar o serviço)
+        config.read(config_path, encoding='utf-8')
+        horario = config.get("ORQUESTRADOR", "HORARIO_EXECUCAO", fallback="17:15")
+        
+        # Calcula quantos segundos faltam para chegar nesse horário
+        segundos_espera = calcular_segundos_ate_horario(horario)
+        horas_espera = segundos_espera / 3600
+        
+        print(f"\n[zZz] O Mestre está dormindo. Ele acordará em {horas_espera:.2f} horas, exatamente às {horario}.")
+        
+        # O programa pausa aqui e não consome nada da CPU do servidor
+        time.sleep(segundos_espera)
+        
+        # Quando acorda, executa a rotina
+        rotina_diaria_de_modulacao()
 
 if __name__ == "__main__":
     main()
